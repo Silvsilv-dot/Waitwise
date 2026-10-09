@@ -361,6 +361,11 @@ st.markdown("""
 .pname{font-size:1.15rem;font-weight:700;color:#17323d}
 .slot-open{color:#1a62a8;font-weight:600}.slot-booked{color:#17323d;font-weight:600}
 div.stButton>button{border-radius:10px}
+.st-key-cal button{min-height:68px;line-height:1.25;white-space:normal}
+.st-key-times button{min-height:44px}
+.dayhdr{text-align:center;font-weight:700;color:#5b6b75;font-size:.85rem}
+.monthttl{text-align:center;font-size:1.4rem;font-weight:700;color:#17323d;padding-top:.3rem}
+.rowtxt{line-height:1.3}.rowtxt .sm{color:#6b7c86;font-size:.85rem}
 </style>
 """, unsafe_allow_html=True)
 
@@ -456,65 +461,102 @@ def patient_status(pid):
     c[3].markdown(stat("schedule", "Provider status", status, big=False), unsafe_allow_html=True)
 
 
+def select_day(d):
+    ss["sel_day"], ss["pending"] = d, None
+
+
+def set_pending(s):
+    ss["pending"] = s
+
+
+def go_month(delta):
+    y, m = ss["cal_month"]
+    m += delta
+    if m == 13:
+        y, m = y + 1, 1
+    if m == 0:
+        y, m = y - 1, 12
+    ss["cal_month"] = (y, m)
+
+
+def jump_to(d):
+    ss["cal_month"] = (d.year, d.month)
+    select_day(d)
+
+
 def patient_calendar(pid):
     appt = next_appt(pid)
     if not appt:
         return
+    now = now_et()
+    today, last = now.date(), six_months_out(now.date())
     st.divider()
-    st.subheader(":material/calendar_month: Reschedule — open times")
-    today = now_et().date()
-    last = six_months_out(today)
-    scope = st.radio("Show times for", ["My provider", "Any provider"], horizontal=True)
-    prov = appt["provider_id"] if scope == "My provider" else None
+    st.subheader(":material/calendar_month: Reschedule your visit")
+    other = st.toggle("Include other providers", value=False)
+    prov = None if other else appt["provider_id"]
     slots = open_slots(appt["duration_minutes"], prov)
     names = {p["provider_id"]: p["name"] for p in providers()}
     names.setdefault(appt["provider_id"], appt["provider_name"])
     by_day = {}
     for s in slots:
         by_day.setdefault(s["start"].date(), []).append(s)
+    ss.setdefault("cal_month", (today.year, today.month))
+    y, m = ss["cal_month"]
 
-    months, y, m = [], today.year, today.month
-    while (y, m) <= (last.year, last.month):
-        months.append((y, m))
-        y, m = (y, m + 1) if m < 12 else (y + 1, 1)
-    sel = st.selectbox("Month", months, format_func=lambda ym: date(ym[0], ym[1], 1).strftime("%B %Y"))
-    hdr = st.columns(7)
-    for i, d in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
-        hdr[i].markdown(f"**{d}**")
-    for wk in calendar.Calendar(6).monthdatescalendar(*sel):
-        cols = st.columns(7)
-        for i, d in enumerate(wk):
-            if d.month != sel[1]:
-                continue
-            n = len(by_day.get(d, []))
-            if cols[i].button(f"{d.day}\n{n} open" if n else f"{d.day}", key=f"day{d}", disabled=n == 0,
-                              use_container_width=True, type="primary" if ss.get("sel_day") == d else "secondary"):
-                ss["sel_day"], ss["pending"] = d, None
+    if slots:
+        f = slots[0]
+        st.button(f"Next available: {fmt_date(f['start'])} · {fmt_time(f['start'])}", icon=":material/bolt:",
+                  on_click=jump_to, args=(f["start"].date(),))
+
+    cal, times = st.columns([3, 2], gap="large")
+    with cal:
+        nav = st.columns([1, 4, 1])
+        nav[0].button("◀", key="cal_prev", on_click=go_month, args=(-1,), disabled=(y, m) <= (today.year, today.month), use_container_width=True)
+        nav[1].markdown(f"<div class='monthttl'>{calendar.month_name[m]} {y}</div>", unsafe_allow_html=True)
+        nav[2].button("▶", key="cal_next", on_click=go_month, args=(1,), disabled=(y, m) >= (last.year, last.month), use_container_width=True)
+        with st.container(key="cal"):
+            hdr = st.columns(7)
+            for i, d in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
+                hdr[i].markdown(f"<div class='dayhdr'>{d}</div>", unsafe_allow_html=True)
+            for wk in calendar.Calendar(6).monthdatescalendar(y, m):
+                cols = st.columns(7)
+                for i, d in enumerate(wk):
+                    if d.month != m:
+                        continue
+                    n = len(by_day.get(d, []))
+                    star = " ★" if d == appt["start"].date() else ""
+                    if n:
+                        dot = "🟢" if n >= 6 else "🟡"
+                        label = f"**{d.day}**{star}  \n{dot} {n} open"
+                    else:
+                        label = f"**{d.day}**{star}  \n–"
+                    cols[i].button(label, key=f"cd{d}", disabled=n == 0, use_container_width=True,
+                                   type="primary" if ss.get("sel_day") == d else "secondary",
+                                   on_click=select_day, args=(d,))
+        st.caption(f"🟢 6+ open · 🟡 1–5 open · ★ your current visit · showing openings through {last.strftime('%b %d, %Y')}")
+
+    with times:
+        day = ss.get("sel_day")
+        if not day or day not in by_day:
+            st.markdown("#### Open times")
+            st.caption("Pick a highlighted date on the calendar.")
+        else:
+            st.markdown(f"#### {day.strftime('%A, %B %d')}")
+            with st.container(key="times"):
+                for s in by_day[day]:
+                    label = fmt_time(s["start"]) + ("" if prov else f" · {names[s['provider_id']]}")
+                    st.button(label, key=f"slot{s['provider_id']}{s['start'].isoformat()}", use_container_width=True,
+                              on_click=set_pending, args=(s,))
+        pend = ss.get("pending")
+        if pend:
+            st.success(f"Move to **{pend['start'].strftime('%a, %b %d')} at {fmt_time(pend['start'])} ET** with **{names[pend['provider_id']]}**?")
+            if st.button("Confirm reschedule", type="primary", icon=":material/check_circle:", use_container_width=True):
+                ok = reschedule(appt["appointment_id"], pend["provider_id"], pend["start"], "patient", pid)
+                ss["pending"] = None
+                st.toast("Appointment rescheduled." if ok else "That time was just taken. Please pick another.", icon="✅" if ok else "⚠️")
                 st.rerun()
-    st.caption(f"Showing openings through {last.strftime('%B %d, %Y')} (6 months).")
-    day = ss.get("sel_day")
-    if day and day in by_day:
-        st.markdown(f"#### Open times on {day.strftime('%A, %B %d, %Y')}")
-        cols = st.columns(4)
-        for i, s in enumerate(by_day[day]):
-            label = fmt_time(s["start"]) if prov else f"{fmt_time(s['start'])} · {names[s['provider_id']].replace('Dr. ', 'Dr ')}"
-            if cols[i % 4].button(label, key=f"slot{s['provider_id']}{s['start']}", use_container_width=True):
-                ss["pending"] = s
-                st.rerun()
-    pend = ss.get("pending")
-    if pend:
-        st.success(f"Move my appointment to **{pend['start'].strftime('%A, %B %d')} at {fmt_time(pend['start'])} ET** "
-                   f"with **{names[pend['provider_id']]}**?")
-        a, b = st.columns(2)
-        if a.button("Confirm reschedule", type="primary", icon=":material/check_circle:"):
-            ok = reschedule(appt["appointment_id"], pend["provider_id"], pend["start"], "patient", pid)
-            ss["pending"] = None
-            st.toast("Appointment rescheduled." if ok else "That time was just taken. Please pick another.", icon="✅" if ok else "⚠️")
-            st.rerun()
-        if b.button("Keep my current time", icon=":material/close:"):
-            ss["pending"] = None
-            st.rerun()
-    st.info(f":material/call: Need a date later than {last.strftime('%B %d, %Y')}? Please call the front desk at **{FRONT_DESK}**.")
+            st.button("Keep my current time", icon=":material/close:", use_container_width=True, on_click=set_pending, args=(None,))
+    st.info(f":material/call: Need a date after {last.strftime('%B %d, %Y')}? Please call the front desk at **{FRONT_DESK}**.")
 
 
 def patient_view():
@@ -550,47 +592,61 @@ def who():
     return "staff", ss["staff_name"]
 
 
-def appt_buttons(a, key, now):
-    if a["status"] != "scheduled":
-        return
-    c1, c2 = st.columns(2)
-    if c1.button("Cancel", key=f"c{key}", icon=":material/cancel:", use_container_width=True):
-        set_status(a["appointment_id"], "cancelled", *who())
-        st.rerun()
-    if c2.button("No show", key=f"n{key}", icon=":material/person_off:", use_container_width=True, disabled=a["start"] > now):
-        set_status(a["appointment_id"], "no_show", *who())
-        st.rerun()
+def next_workday(d, step=1):
+    while not is_workday(d):
+        d += timedelta(days=step)
+    return d
+
+
+def go_day(delta):
+    ss["sch_day"] = next_workday(ss["sch_day"] + timedelta(days=delta), 1 if delta > 0 else -1)
+
+
+def go_today():
+    ss["sch_day"] = next_workday(now_et().date())
+
+
+def set_focus(pid):
+    ss["focus_pid"] = pid
+
+
+def clear_focus():
+    ss["focus_pid"] = None
+    ss["last_pick"] = None
+
+
+def do_status(appt_id, status):
+    set_status(appt_id, status, *who())
 
 
 @st.fragment(run_every=10)
-def provider_board():
+def provider_cards():
     now = now_et()
     provs = providers()
     appts = appts_between(at(now.date(), 0), at(now.date() + timedelta(days=1), 0))
-    cols = st.columns(3)
+    cols = st.columns(max(len(provs), 1))
     for i, p in enumerate(provs):
         mine = [a for a in appts if a["provider_id"] == p["provider_id"]]
         cls, label = status_of(p, mine)
         cur = next((a for a in mine if a["start"] <= now < a["end"] and a["status"] == "scheduled"), None)
         nxt = next((a for a in mine if a["start"] > now and a["status"] == "scheduled"), None)
         if cur:
-            line = f'<span class="msr">person</span> Now: {esc(pname(cur["patient_id"]))} · <b>{esc(cur["type_name"])}</b>'
+            line = f'<span class="msr">person</span> In visit · <b>{esc(cur["type_name"])}</b>'
         elif nxt:
-            line = f'<span class="msr">schedule</span> Next {fmt_time(nxt["start"])}: {esc(pname(nxt["patient_id"]))} · <b>{esc(nxt["type_name"])}</b>'
+            line = f'<span class="msr">schedule</span> Next {fmt_time(nxt["start"])} · <b>{esc(nxt["type_name"])}</b>'
         else:
-            line = '<span class="msr">check_circle</span> No more appointments today'
+            line = '<span class="msr">check_circle</span> Nothing more today'
         booked = sum(1 for a in mine if a["status"] in ("scheduled", "completed"))
-        cols[i % 3].markdown(
+        cols[i].markdown(
             f'<div class="card"><div class="pname"><span class="msr">stethoscope</span> {esc(p["name"])}</div>'
             f'<div class="muted">{esc(p["specialty"])}</div><div style="margin:.5rem 0"><span class="pill {cls}">{label}</span></div>'
-            f'<div style="display:flex;gap:2rem"><div><div class="big">{booked}</div><div class="muted">appts today</div></div>'
-            f'<div><div class="big">{p["delay_min"]}</div><div class="muted">min delay</div></div></div>'
+            f'<div style="display:flex;gap:1.6rem"><div><div class="big">{booked}</div><div class="muted">booked today</div></div>'
+            f'<div><div class="big">{p["delay_min"]}</div><div class="muted">min late</div></div></div>'
             f'<div class="muted" style="margin-top:.6rem">{line}</div></div>', unsafe_allow_html=True)
-        cols[i % 3].write("")
 
 
 def delay_controls():
-    with st.expander("Update provider delay", icon=":material/timer:"):
+    with st.expander("Update a provider's delay", icon=":material/timer:"):
         provs = providers()
         c = st.columns([2, 1, 1, 2])
         pv = c[0].selectbox("Provider", provs, format_func=lambda p: p["name"], key="dl_p")
@@ -607,88 +663,110 @@ def delay_controls():
 
 
 @st.fragment(run_every=10)
-def schedule_tab():
+def schedule_panel():
     now = now_et()
-    c = st.columns([1, 2])
-    day = c[0].date_input("Day", value=now.date(), format="MM/DD/YYYY", key="sch_day")
     provs = providers()
-    mode = c[1].radio("View", ["All providers overview", "Manage one provider"], horizontal=True)
-    appts = appts_between(at(day, 0), at(day + timedelta(days=1), 0), include_cancelled=True)
-    live = [a for a in appts if a["status"] != "cancelled"]
-    if mode == "All providers overview":
-        data = {}
-        for p in provs:
-            col = {}
-            for r in day_rows(day, [a for a in live if a["provider_id"] == p["provider_id"]], now):
-                if r["kind"] == "lunch":
-                    txt = "Lunch"
-                elif r["kind"] == "open":
-                    txt = "Open" if r["tstate"] != "past" else "Open (past)"
-                else:
-                    a = r["appt"]
-                    txt = f"{a['type_name']} · {pname(a['patient_id'])} [{a['status'].replace('_', ' ')}]"
-                    if r["tstate"] == "now":
-                        txt = "▶ " + txt
-                col[fmt_time(r["start"])] = txt
-                if r["kind"] == "appt" and (r["end"] - r["start"]) > timedelta(minutes=30):
-                    col[fmt_time(r["start"] + timedelta(minutes=30))] = "↳ (continues)"
-            data[p["name"]] = col
-        st.dataframe(pd.DataFrame(data).fillna(""), use_container_width=True, height=640)
-        st.caption("30-min follow-ups · 60-min new patients · times in Eastern Time.")
-        return
-    pv = st.selectbox("Provider", provs, format_func=lambda p: p["name"], key="sch_prov")
-    mine = [a for a in live if a["provider_id"] == pv["provider_id"]]
-    for r in day_rows(day, mine, now):
-        c = st.columns([1.5, 1.2, 3, 2.4])
-        c[0].markdown(f"**{fmt_time(r['start'])}** – {fmt_time(r['end'])}")
+    names = {p["provider_id"]: p["name"] for p in provs}
+    ids = list(names)
+    sel = st.segmented_control("Provider", ids, format_func=lambda i: names[i], default=ids[0],
+                               key="sch_prov", label_visibility="collapsed")
+    pid = sel if sel in names else ids[0]
+    day = ss["sch_day"]
+    n = st.columns([1, 1, 3, 1])
+    n[0].button("◀", key="d_prev", on_click=go_day, args=(-1,), use_container_width=True)
+    n[1].button("Today", key="d_today", on_click=go_today, use_container_width=True)
+    n[2].markdown(f"<div class='monthttl' style='font-size:1.15rem'>{day.strftime('%A, %B %d, %Y')}</div>", unsafe_allow_html=True)
+    n[3].button("▶", key="d_next", on_click=go_day, args=(1,), use_container_width=True)
+
+    appts = appts_between(at(day, 0), at(day + timedelta(days=1), 0), pid)
+    lunch_shown = False
+    for r in day_rows(day, appts, now):
         if r["kind"] == "lunch":
-            c[1].caption("Lunch")
+            if not lunch_shown:
+                st.caption("12:00 – 1:00 PM · Lunch")
+                lunch_shown = True
             continue
+        c = st.columns([2.8, 1.1, 1.1, 1.3])
+        span = f"{fmt_time(r['start'])} – {fmt_time(r['end'])}"
         if r["kind"] == "open":
-            c[1].markdown('<span class="slot-open">Open</span>', unsafe_allow_html=True)
-            c[2].caption("Past" if r["tstate"] == "past" else "Available to book")
+            sub = '<span class="slot-open">Open</span>' + (" · past" if r["tstate"] == "past" else "")
+            c[0].markdown(f"<div class='rowtxt'><b>{span}</b><br><span class='sm'>{sub}</span></div>", unsafe_allow_html=True)
             continue
         a = r["appt"]
         tag = {"scheduled": "Booked", "completed": "Completed", "no_show": "No-show"}[a["status"]]
         if a["status"] == "scheduled" and r["tstate"] == "past":
-            tag = "Past (not marked)"
-        elif r["tstate"] == "now" and a["status"] == "scheduled":
+            tag = "Past · not marked"
+        elif a["status"] == "scheduled" and r["tstate"] == "now":
             tag = "In progress"
-        c[1].markdown(f'<span class="slot-booked">{tag}</span>', unsafe_allow_html=True)
-        c[2].write(f"{a['type_name']} · {pname(a['patient_id'])}")
-        with c[3]:
-            appt_buttons(a, f"s{a['appointment_id']}", now)
-    canc = [a for a in appts if a["status"] == "cancelled" and a["provider_id"] == pv["provider_id"]]
-    if canc:
-        with st.expander(f"Cancelled ({len(canc)})"):
-            for a in canc:
-                st.write(f"{fmt_time(a['start'])} · {a['type_name']} · {pname(a['patient_id'])}")
+        c[0].markdown(f"<div class='rowtxt'><b>{span}</b><br><span class='sm'>{tag} · {esc(a['type_name'])}</span></div>", unsafe_allow_html=True)
+        c[1].button("View", key=f"v{a['appointment_id']}", icon=":material/person:", use_container_width=True,
+                    on_click=set_focus, args=(a["patient_id"],))
+        if a["status"] == "scheduled":
+            c[2].button("Cancel", key=f"c{a['appointment_id']}", use_container_width=True,
+                        on_click=do_status, args=(a["appointment_id"], "cancelled"))
+            c[3].button("No-show", key=f"n{a['appointment_id']}", use_container_width=True,
+                        disabled=a["start"] > now, on_click=do_status, args=(a["appointment_id"], "no_show"))
+    if not appts:
+        st.caption("No appointments booked this day." if is_workday(day) else "Clinic closed.")
 
 
-def search_tab():
-    q = st.text_input("Search patient name", placeholder="e.g. Maria or Chowdhury", icon=":material/search:")
-    if not q.strip():
-        st.caption("Type at least part of a first or last name.")
+def patient_panel():
+    st.markdown("#### :material/person: Patient")
+    q = st.text_input("Search by name", placeholder="First or last name", icon=":material/search:", key="pq")
+    if q.strip():
+        hits = [pid for pid, p in patient_map().items() if q.strip().lower() in f"{p['first_name']} {p['last_name']}".lower()][:10]
+        if not hits:
+            st.caption("No matching patients.")
+        else:
+            pick = st.selectbox("Matches", hits, index=None, format_func=pname, key="ppick",
+                                placeholder=f"{len(hits)} match(es) — choose one")
+            if pick and pick != ss.get("last_pick"):
+                ss["last_pick"], ss["focus_pid"] = pick, pick
+            elif not pick:
+                ss["last_pick"] = None
+    pid = ss.get("focus_pid")
+    if not pid:
+        st.info("Search for a patient, or press View on a booked slot.")
         return
-    hits = [pid for pid, p in patient_map().items() if q.lower() in f"{p['first_name']} {p['last_name']}".lower()][:15]
-    if not hits:
-        st.warning("No matching patients.")
-        return
-    pid = st.selectbox("Matches", hits, format_func=lambda i: pname(i))
-    if ss.get("viewed") != pid:
+    if ss.get("audited_focus") != pid:
         audit(*who(), "VIEW_PATIENT", "patients", pid)
-        ss["viewed"] = pid
+        ss["audited_focus"] = pid
     p = patient_map()[pid]
-    st.markdown(f"### :material/person: {p['first_name']} {p['last_name']}  \n"
-                f"<span class='muted'>DOB {p['date_of_birth']:%m/%d/%Y} · {p['sex']} · {p['phone_masked']}</span>", unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="card"><div class="mid">{esc(p["first_name"])} {esc(p["last_name"])}</div>'
+        f'<div class="muted">DOB {p["date_of_birth"]:%m/%d/%Y} · {esc(p["sex"])} · {esc(p["phone_masked"])}</div></div>',
+        unsafe_allow_html=True)
+    st.write("")
     now = now_et()
-    for a in patient_appts(pid):
-        c = st.columns([2, 2, 1.5, 2.4])
-        c[0].write(f"**{fmt_date(a['start'])}** · {fmt_time(a['start'])}")
-        c[1].write(a["provider_name"])
-        c[2].write(f"{a['type_name']} · {a['status'].replace('_', ' ')}")
-        with c[3]:
-            appt_buttons(a, f"p{a['appointment_id']}", now)
+    appts = patient_appts(pid)
+    upcoming = sorted([a for a in appts if a["end"] > now and a["status"] != "cancelled"], key=lambda a: a["start"])[:4]
+    recent = [a for a in appts if a["end"] <= now][:3]
+    for title, group in (("Upcoming", upcoming), ("Recent", recent)):
+        if not group:
+            continue
+        st.caption(title.upper())
+        for a in group:
+            c = st.columns([3, 1.2, 1.3])
+            c[0].markdown(f"<div class='rowtxt'><b>{fmt_date(a['start'])} · {fmt_time(a['start'])}</b><br>"
+                          f"<span class='sm'>{esc(a['provider_name'])} · {esc(a['type_name'])} · {a['status'].replace('_', ' ')}</span></div>",
+                          unsafe_allow_html=True)
+            if a["status"] == "scheduled":
+                c[1].button("Cancel", key=f"pc{a['appointment_id']}", use_container_width=True,
+                            on_click=do_status, args=(a["appointment_id"], "cancelled"))
+                c[2].button("No-show", key=f"pn{a['appointment_id']}", use_container_width=True,
+                            disabled=a["start"] > now, on_click=do_status, args=(a["appointment_id"], "no_show"))
+    st.button("Close patient", icon=":material/close:", on_click=clear_focus)
+
+
+def schedule_tab():
+    provider_cards()
+    delay_controls()
+    st.write("")
+    left, right = st.columns([5, 3], gap="large")
+    with left:
+        schedule_panel()
+    with right:
+        patient_panel()
 
 
 def waitlist_tab():
@@ -701,22 +779,25 @@ def waitlist_tab():
     if not wl:
         st.success("Waitlist is empty.")
         return
-    st.dataframe(pd.DataFrame([{
-        "Patient": pname(w["patient_id"]), "Provider": w["provider_name"],
-        "Preferred from": w["preferred_start_date"].strftime("%b %d"), "Preferred to": w["preferred_end_date"].strftime("%b %d, %Y"),
-        "Waiting since (ET)": w["created"].strftime("%b %d, %I:%M %p")} for w in wl]),
-        use_container_width=True, hide_index=True)
-    st.markdown("#### Fill an opening")
-    w = st.selectbox("Waitlisted patient", wl, format_func=lambda w: f"{pname(w['patient_id'])} · {w['provider_name']} · {w['preferred_start_date']:%b %d}–{w['preferred_end_date']:%b %d}")
-    tid = st.radio("Visit type", list(types()), format_func=tlabel, horizontal=True, index=list(types()).index(2) if 2 in types() else 0)
-    anydate = st.checkbox("Show openings outside the patient's preferred dates")
+    w = st.selectbox("Waitlisted patient", wl, index=None, placeholder="Choose a patient to fill an opening",
+                     format_func=lambda w: f"{pname(w['patient_id'])} · {w['provider_name']}")
+    if not w:
+        return
+    st.markdown(
+        f'<div class="card"><div class="mid">{esc(pname(w["patient_id"]))}</div><div class="muted">Wants {esc(w["provider_name"])} · '
+        f'{w["preferred_start_date"]:%b %d} to {w["preferred_end_date"]:%b %d, %Y} · waiting since {w["created"]:%b %d}</div></div>',
+        unsafe_allow_html=True)
+    st.write("")
+    tid = st.radio("Visit type", list(types()), format_func=lambda t: f"{tlabel(t)} ({tdur(t)} min)", horizontal=True,
+                   index=list(types()).index(2) if 2 in types() else 0)
+    anydate = st.checkbox("Also show openings outside the preferred dates")
     opts = [s for s in open_slots(tdur(tid), w["provider_id"])
             if anydate or w["preferred_start_date"] <= s["start"].date() <= w["preferred_end_date"]][:30]
     if not opts:
         st.info("No matching openings for this provider and date range.")
     else:
-        s = st.selectbox("Matching openings", opts, format_func=lambda s: f"{fmt_date(s['start'])} · {fmt_time(s['start'])} · {w['provider_name']}")
-        if st.button("Book from waitlist", type="primary", icon=":material/event_available:"):
+        s = st.selectbox("Matching openings", opts, format_func=lambda s: f"{fmt_date(s['start'])} · {fmt_time(s['start'])}")
+        if st.button("Book this opening", type="primary", icon=":material/event_available:"):
             ok = book(w["patient_id"], s["provider_id"], s["start"], tid, *who(), waitlist_id=w["waitlist_id"])
             st.toast("Booked from waitlist." if ok else "Slot was just taken — pick another.", icon="✅" if ok else "⚠️")
             st.rerun()
@@ -730,34 +811,30 @@ def json_short(d):
 
 
 def audit_tab():
-    st.caption("Every change made in the app is recorded here. Patient names are never written to the log, only IDs.")
+    st.caption("Every change is recorded here. Patient names are never written to the log, only IDs.")
     st.dataframe(pd.DataFrame([{
         "Time (ET)": r["ts_et"].strftime("%b %d %I:%M:%S %p"), "Role": r["user_role"], "User": r["user_id"],
         "Action": r["action_type"], "Table": r["table_affected"], "Record": r["record_id"] or "",
-        "Before": json_short(r["old_values_json"]), "After": json_short(r["new_values_json"])} for r in audit_rows()]),
-        use_container_width=True, hide_index=True, height=520)
+        "Before": json_short(r["old_values_json"]), "After": json_short(r["new_values_json"])} for r in audit_rows(100)]),
+        use_container_width=True, hide_index=True, height=480)
 
 
 def staff_view():
     if not ss.get("staff_ok"):
         staff_login()
         return
-    t = st.tabs([":material/stethoscope: Providers", ":material/calendar_view_day: Schedule",
-                 ":material/search: Patient search", ":material/hourglass_top: Waitlist", ":material/history: Audit log"])
+    ss.setdefault("sch_day", next_workday(now_et().date()))
+    t = st.tabs([":material/calendar_view_day: Schedule", ":material/hourglass_top: Waitlist", ":material/history: Activity log"])
     with t[0]:
-        provider_board()
-        delay_controls()
-    with t[1]:
         schedule_tab()
-    with t[2]:
-        search_tab()
-    with t[3]:
+    with t[1]:
         waitlist_tab()
-    with t[4]:
+    with t[2]:
         audit_tab()
     if st.sidebar.button("Staff sign out", icon=":material/logout:"):
         audit(*who(), "LOGOUT")
-        ss.pop("staff_ok", None)
+        for k in ("staff_ok", "focus_pid", "last_pick", "audited_focus"):
+            ss.pop(k, None)
         st.rerun()
 
 
