@@ -121,7 +121,8 @@ def engine():
             url = "postgresql+psycopg2://" + url[len(prefix):]
     if "sslmode" not in url:  # always encrypt in transit
         url += ("&" if "?" in url else "?") + "sslmode=require"
-    return create_engine(url, pool_pre_ping=True, pool_recycle=240, pool_size=5)
+    return create_engine(url, pool_pre_ping=True, pool_recycle=240, pool_size=5,
+                         connect_args={"application_name": "waitwise-app"})
 
 
 def query(sql, **params):
@@ -352,8 +353,16 @@ st.markdown("""
 .pname{font-size:1.15rem;font-weight:700;color:#17323d}
 .slot-open{color:#1a62a8;font-weight:600}.slot-booked{color:#17323d;font-weight:600}
 div.stButton>button{border-radius:10px}
-.st-key-cal button{min-height:68px;line-height:1.25;white-space:normal}
-.st-key-times button{min-height:44px}
+.st-key-cal [data-testid="stColumn"]{min-width:0 !important}
+.st-key-cal [data-testid="stHorizontalBlock"]{gap:.35rem}
+.st-key-cal button{min-height:64px;padding:.2rem .1rem;line-height:1.2;white-space:normal;
+     border-radius:12px;border:1px solid rgba(128,128,128,.25);overflow:visible}
+.st-key-cal button p{margin:0;font-size:.82rem;text-align:center;white-space:normal;overflow:visible;text-overflow:clip}
+.st-key-cal button p strong{font-size:1.1rem;display:block}
+.st-key-cal button:disabled{opacity:.35;background:transparent}
+.st-key-times button{min-height:42px;border-radius:10px}
+.legend{display:flex;gap:1rem;flex-wrap:wrap;font-size:.85rem;color:#6b7c86;margin-top:.4rem}
+.legend i{display:inline-block;width:.8rem;height:.8rem;border-radius:4px;margin-right:.35rem;vertical-align:-1px}
 .dayhdr{text-align:center;font-weight:700;color:#5b6b75;font-size:.85rem}
 .monthttl{text-align:center;font-size:1.4rem;font-weight:700;color:#17323d;padding-top:.3rem}
 .rowtxt{line-height:1.3}.rowtxt .sm{color:#6b7c86;font-size:.85rem}
@@ -475,6 +484,15 @@ def patient_calendar(pid):
         nav[0].button("◀", key="cal_prev", on_click=go_month, args=(-1,), disabled=(y, m) <= (today.year, today.month), use_container_width=True)
         nav[1].markdown(f"<div class='monthttl'>{calendar.month_name[m]} {y}</div>", unsafe_allow_html=True)
         nav[2].button("▶", key="cal_next", on_click=go_month, args=(1,), disabled=(y, m) >= (last.year, last.month), use_container_width=True)
+        # tint each available day by how many openings it has (green 6+, amber 1-5)
+        tint = []
+        for d, lst in by_day.items():
+            if d.month == m and d.year == y and ss.get("sel_day") != d:
+                col = "rgba(33,168,100,.20)" if len(lst) >= 6 else "rgba(240,170,30,.22)"
+                tint.append(f".st-key-cd{d} button{{background:{col}}}")
+        cur = appt["start"].date()
+        tint.append(f".st-key-cd{cur} button{{outline:2px solid #0b6e8a;outline-offset:-2px}}")
+        st.markdown(f"<style>{''.join(tint)}</style>", unsafe_allow_html=True)
         with st.container(key="cal"):
             hdr = st.columns(7)
             for i, d in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
@@ -485,16 +503,15 @@ def patient_calendar(pid):
                     if d.month != m:
                         continue
                     n = len(by_day.get(d, []))
-                    star = " ★" if d == appt["start"].date() else ""
-                    if n:
-                        dot = "🟢" if n >= 6 else "🟡"
-                        label = f"**{d.day}**{star}  \n{dot} {n} open"
-                    else:
-                        label = f"**{d.day}**{star}  \n–"
+                    label = f"**{d.day}**  \n{n} open" if n else f"**{d.day}**"
                     cols[i].button(label, key=f"cd{d}", disabled=n == 0, use_container_width=True,
                                    type="primary" if ss.get("sel_day") == d else "secondary",
                                    on_click=select_day, args=(d,))
-        st.caption(f"🟢 6+ open · 🟡 1–5 open · ★ your current visit · showing openings through {last.strftime('%b %d, %Y')}")
+        st.markdown(
+            "<div class='legend'><span><i style='background:rgba(33,168,100,.5)'></i>6+ open</span>"
+            "<span><i style='background:rgba(240,170,30,.55)'></i>1–5 open</span>"
+            "<span><i style='border:2px solid #0b6e8a'></i>Your current visit</span>"
+            f"<span>Openings shown through {last.strftime('%b %d, %Y')}</span></div>", unsafe_allow_html=True)
 
     with times:
         day = ss.get("sel_day")
@@ -504,10 +521,20 @@ def patient_calendar(pid):
         else:
             st.markdown(f"#### {day.strftime('%A, %B %d')}")
             with st.container(key="times"):
-                for s in by_day[day]:
-                    label = fmt_time(s["start"]) + ("" if prov else f" · {names[s['provider_id']]}")
-                    st.button(label, key=f"slot{s['provider_id']}{s['start'].isoformat()}", use_container_width=True,
-                              on_click=set_pending, args=(s,))
+                ncol = 3 if prov else 2
+                for part, rng in (("Morning", lambda s: s["start"].hour < 12), ("Afternoon", lambda s: s["start"].hour >= 12)):
+                    grp = [s for s in by_day[day] if rng(s)]
+                    if not grp:
+                        continue
+                    st.caption(part.upper())
+                    for k in range(0, len(grp), ncol):
+                        row = st.columns(ncol)
+                        for j, s in enumerate(grp[k:k + ncol]):
+                            label = fmt_time(s["start"]) + ("" if prov else f"  \n{names[s['provider_id']]}")
+                            row[j].button(label, key=f"slot{s['provider_id']}{s['start'].isoformat()}",
+                                          use_container_width=True, on_click=set_pending, args=(s,),
+                                          type="primary" if (ss.get("pending") or {}).get("start") == s["start"]
+                                          and (ss.get("pending") or {}).get("provider_id") == s["provider_id"] else "secondary")
         pend = ss.get("pending")
         if pend:
             st.success(f"Move to **{pend['start'].strftime('%a, %b %d')} at {fmt_time(pend['start'])} ET** with **{names[pend['provider_id']]}**?")
@@ -754,13 +781,98 @@ def json_short(d):
     return ", ".join(f"{k}={v}" for k, v in (d or {}).items())[:120]
 
 
+ACTION_LABELS = {
+    "BOOK": "🟢 Booked", "BOOK_FROM_WAITLIST": "🟢 Booked from waitlist", "RESCHEDULE": "🔵 Rescheduled",
+    "CANCELLED": "🔴 Cancelled", "NO_SHOW": "🟠 No-show", "COMPLETED": "✅ Completed",
+    "SET_DELAY": "⏱️ Delay updated", "WAITLIST_FILLED": "🟣 Waitlist filled", "WAITLIST_REMOVED": "⚪ Removed from waitlist",
+    "VIEW": "👁️ Viewed", "VIEW_PATIENT": "👁️ Viewed", "DB_INSERT": "🗄️ Added in database",
+    "DB_UPDATE": "🗄️ Edited in database", "DB_DELETE": "🗄️ Deleted in database",
+}
+
+
+def _obj(v):
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except Exception:
+            return {}
+    return v or {}
+
+
+def _t(v):
+    try:
+        d = datetime.fromisoformat(str(v)).astimezone(ET)
+        return f"{fmt_date(d)} {fmt_time(d)}"
+    except Exception:
+        return str(v)
+
+
+def describe(r):
+    a, o, n = r["action_type"], _obj(r["old_values_json"]), _obj(r["new_values_json"])
+    if a in ("VIEW", "VIEW_PATIENT"):
+        return ""
+    if a in ("BOOK", "BOOK_FROM_WAITLIST"):
+        return f"Patient #{n.get('patient_id')} · {_t(n.get('start'))}"
+    if a == "RESCHEDULE":
+        return f"{_t(o.get('start'))}  →  {_t(n.get('start'))}"
+    if a == "SET_DELAY":
+        return f"{o.get('delay_minutes') or 0} min  →  {n.get('delay_minutes')} min late"
+    if "status" in o or "status" in n:
+        return f"{o.get('status', '—')}  →  {n.get('status', '—')}"
+    return json_short(n or o)
+
+
+@st.fragment(run_every=10)
 def audit_tab():
-    st.caption("Every change is recorded here. Patient names are never written to the log, only IDs.")
-    st.dataframe(pd.DataFrame([{
-        "Time (ET)": r["ts_et"].strftime("%b %d %I:%M:%S %p"), "Role": r["user_role"], "User": r["user_id"],
-        "Action": r["action_type"], "Table": r["table_affected"], "Record": r["record_id"] or "",
-        "Before": json_short(r["old_values_json"]), "After": json_short(r["new_values_json"])} for r in audit_rows(100)]),
-        use_container_width=True, hide_index=True, height=480)
+    st.caption("Every change is recorded here, refreshed every 10 seconds. Patient names are never stored in the log, only IDs.")
+    rows = audit_rows(300)
+    c = st.columns([2, 2, 2, 1.4])
+    changes_only = c[3].toggle("Changes only", value=True, help="Hide 'Viewed' entries")
+    roles = sorted({r["user_role"] for r in rows})
+    role_f = c[0].multiselect("Role", roles, placeholder="All roles")
+    acts = sorted({ACTION_LABELS.get(r["action_type"], r["action_type"]) for r in rows})
+    act_f = c[1].multiselect("Event", acts, placeholder="All events")
+    q = c[2].text_input("Search", placeholder="User, record ID, detail", icon=":material/search:")
+
+    def keep(r):
+        lab = ACTION_LABELS.get(r["action_type"], r["action_type"])
+        if changes_only and r["action_type"] in ("VIEW", "VIEW_PATIENT"):
+            return False
+        if r["action_type"] == "LOGIN_FAILED" and changes_only:
+            return False
+        if role_f and r["user_role"] not in role_f:
+            return False
+        if act_f and lab not in act_f:
+            return False
+        if q.strip() and q.strip().lower() not in f"{r['user_id']} {r['record_id']} {describe(r)} {lab}".lower():
+            return False
+        return True
+
+    shown = [r for r in rows if keep(r)]
+    today = now_et().date()
+    todays = [r for r in rows if r["ts_et"].date() == today and r["action_type"] not in ("VIEW", "VIEW_PATIENT", "LOGIN_FAILED")]
+    s = st.columns(4)
+    s[0].markdown(stat("history", "Changes today", len(todays)), unsafe_allow_html=True)
+    s[1].markdown(stat("event_available", "Booked / rescheduled", sum(1 for r in todays if r["action_type"] in ("BOOK", "BOOK_FROM_WAITLIST", "RESCHEDULE"))), unsafe_allow_html=True)
+    s[2].markdown(stat("event_busy", "Cancelled / no-show", sum(1 for r in todays if r["action_type"] in ("CANCELLED", "NO_SHOW"))), unsafe_allow_html=True)
+    s[3].markdown(stat("timer", "Delay updates", sum(1 for r in todays if r["action_type"] == "SET_DELAY")), unsafe_allow_html=True)
+    st.write("")
+    if not shown:
+        st.info("No activity matches these filters.")
+        return
+    df = pd.DataFrame([{
+        "When": r["ts_et"].strftime("%b %d, %I:%M:%S %p").replace(" 0", " "),
+        "Event": ACTION_LABELS.get(r["action_type"], r["action_type"]),
+        "Who": f"{r['user_role']} · {r['user_id']}",
+        "Record": f"{r['table_affected']} #{r['record_id']}" if r["record_id"] else r["table_affected"],
+        "Details": describe(r)} for r in shown])
+    st.dataframe(df, use_container_width=True, hide_index=True, height=480, column_config={
+        "When": st.column_config.TextColumn(width="small"),
+        "Event": st.column_config.TextColumn(width="medium"),
+        "Who": st.column_config.TextColumn(width="medium"),
+        "Record": st.column_config.TextColumn(width="small"),
+        "Details": st.column_config.TextColumn(width="large")})
+    st.caption(f"Showing {len(shown)} of the latest {len(rows)} entries.")
 
 
 def staff_view():
