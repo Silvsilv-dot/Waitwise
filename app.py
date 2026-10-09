@@ -1,6 +1,6 @@
 """Waitwise - patient flow & scheduling, wired to the existing Neon `waitroom` schema (synthetic data).
 
-Required secrets:  DATABASE_URL (Neon string), STAFF_PASSWORD     Optional: DEMO_MODE (default true)
+Required secret:  DATABASE_URL (Neon string)     Optional: STAFF_PASSWORD (if omitted, staff sign in with a name only), DEMO_MODE
 pip install streamlit sqlalchemy psycopg2-binary pandas tzdata
 """
 import calendar
@@ -107,9 +107,9 @@ def esc(x):
 # ====================================================================== database (Neon)
 missing = []
 try:
-    missing = [k for k in ("DATABASE_URL", "STAFF_PASSWORD") if k not in st.secrets]
+    missing = [k for k in ("DATABASE_URL",) if k not in st.secrets]
 except Exception:
-    missing = ["DATABASE_URL", "STAFF_PASSWORD"]
+    missing = ["DATABASE_URL"]
 if missing:
     st.error(f"Missing secrets: {', '.join(missing)}. Add them in .streamlit/secrets.toml or Streamlit Cloud > Settings > Secrets.")
     st.stop()
@@ -577,10 +577,11 @@ def staff_login():
     st.subheader(":material/badge: Staff sign-in")
     with st.form("slogin"):
         name = st.text_input("Staff name / ID")
-        pw = st.text_input("Password", type="password")
+        needs_pw = "STAFF_PASSWORD" in st.secrets  # optional: no password set = name-only sign-in (demo)
+        pw = st.text_input("Password", type="password") if needs_pw else ""
         go = st.form_submit_button("Sign in", type="primary", icon=":material/login:")
     if go:
-        if name.strip() and hmac.compare_digest(pw, st.secrets["STAFF_PASSWORD"]):
+        if name.strip() and (not needs_pw or hmac.compare_digest(pw, st.secrets["STAFF_PASSWORD"])):
             ss["staff_ok"], ss["staff_name"] = True, name.strip()
             audit("staff", name.strip(), "LOGIN")
             st.rerun()
