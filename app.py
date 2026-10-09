@@ -1,10 +1,9 @@
 """Waitwise - patient flow & scheduling, wired to the existing Neon `waitroom` schema (synthetic data).
 
-Required secret:  DATABASE_URL (Neon string)     Optional: STAFF_PASSWORD (if omitted, staff sign in with a name only), DEMO_MODE
+Required secret:  DATABASE_URL (Neon connection string). No logins, no passwords.
 pip install streamlit sqlalchemy psycopg2-binary pandas tzdata
 """
 import calendar
-import hmac
 import html
 import json
 import random
@@ -20,7 +19,6 @@ st.set_page_config(page_title="Waitwise", page_icon=":material/local_hospital:",
 
 FACILITY = "Riverside Community Health Center"
 FRONT_DESK = "(201) 555-0142"  # fictional number
-IDLE_MINUTES = 15
 SCH = "waitroom"
 
 ET = ZoneInfo("America/New_York")  # all app times shown in US Eastern
@@ -259,13 +257,6 @@ def audit_rows(limit=200):
     return rows
 
 
-def authenticate_patient(last, dob):
-    for pid, p in patient_map().items():
-        if p["last_name"].strip().lower() == last.strip().lower() and p["date_of_birth"] == dob:
-            return pid
-    return None
-
-
 def _conflict(c, provider_id, start, end, exclude_id=None):
     c.execute(text("SELECT pg_advisory_xact_lock(:p)"), dict(p=provider_id))  # serialize bookings per provider
     sql = (f"SELECT 1 FROM {SCH}.appointments WHERE provider_id=:p AND status<>'cancelled' "
@@ -379,17 +370,6 @@ except Exception as e:
     st.stop()
 
 
-def check_idle():
-    last = ss.get("last_activity")
-    if last and (now_et() - last) > timedelta(minutes=IDLE_MINUTES):
-        for k in ("patient_id", "staff_ok", "staff_name"):
-            ss.pop(k, None)
-        st.warning("You were signed out after 15 minutes of inactivity to protect patient privacy.")
-    ss["last_activity"] = now_et()
-
-
-check_idle()
-
 
 @st.fragment(run_every=1)
 def header():
@@ -416,31 +396,12 @@ def status_of(prov, appts_today):
 
 
 # ====================================================================== PATIENT VIEW
-def patient_login():
-    st.subheader(":material/lock: Patient sign-in")
-    st.caption("Verify your identity to see your appointment.")
-    if ss.get("fail_until") and now_et() < ss["fail_until"]:
-        st.error("Too many attempts. Please wait 5 minutes or call the front desk.")
-        return
-    with st.form("plogin"):
-        last = st.text_input("Last name")
-        dob = st.date_input("Date of birth", value=date(1990, 1, 1), min_value=date(1900, 1, 1),
-                            max_value=now_et().date(), format="MM/DD/YYYY")
-        go = st.form_submit_button("View my appointment", type="primary", icon=":material/login:")
-    if st.secrets.get("DEMO_MODE", True):
-        p0 = patient_map()[min(patient_map())]
-        st.caption(f"Demo (synthetic data) → Last name: **{p0['last_name']}**, DOB: **{p0['date_of_birth']:%m/%d/%Y}**")
-    if go:
-        pid = authenticate_patient(last, dob)
-        if pid:
-            ss["patient_id"], ss["fails"] = pid, 0
-            audit("patient", pid, "LOGIN", "patients", pid)
-            st.rerun()
-        ss["fails"] = ss.get("fails", 0) + 1
-        audit("patient", "anonymous", "LOGIN_FAILED")
-        if ss["fails"] >= 5:
-            ss["fail_until"] = now_et() + timedelta(minutes=5)
-        st.error("We couldn't verify those details.")
+def patient_picker():
+    st.subheader(":material/person: Who is checking in?")
+    pats = sorted(patient_map().items(), key=lambda kv: (kv[1]["last_name"], kv[1]["first_name"]))
+    pid = st.selectbox("Select a patient", [k for k, _ in pats], index=None, format_func=lambda i: pname(i),
+                       placeholder="Choose a patient (synthetic data)", key="patient_pick")
+    return pid
 
 
 @st.fragment(run_every=10)
@@ -551,7 +512,7 @@ def patient_calendar(pid):
         if pend:
             st.success(f"Move to **{pend['start'].strftime('%a, %b %d')} at {fmt_time(pend['start'])} ET** with **{names[pend['provider_id']]}**?")
             if st.button("Confirm reschedule", type="primary", icon=":material/check_circle:", use_container_width=True):
-                ok = reschedule(appt["appointment_id"], pend["provider_id"], pend["start"], "patient", pid)
+                ok = reschedule(appt["appointment_id"], pend["provider_id"], pend["start"], "patient", f"patient:{pid}")
                 ss["pending"] = None
                 st.toast("Appointment rescheduled." if ok else "That time was just taken. Please pick another.", icon="✅" if ok else "⚠️")
                 st.rerun()
@@ -560,37 +521,19 @@ def patient_calendar(pid):
 
 
 def patient_view():
-    pid = ss.get("patient_id")
+    pid = patient_picker()
     if not pid:
-        patient_login()
         return
+    if ss.get("audited_patient") != pid:
+        audit("patient", f"patient:{pid}", "VIEW", "patients", pid)
+        ss["audited_patient"] = pid
     patient_status(pid)
     patient_calendar(pid)
-    if st.button("Sign out", icon=":material/logout:"):
-        audit("patient", pid, "LOGOUT", "patients", pid)
-        ss.pop("patient_id", None)
-        st.rerun()
 
 
 # ====================================================================== STAFF VIEW
-def staff_login():
-    st.subheader(":material/badge: Staff sign-in")
-    with st.form("slogin"):
-        name = st.text_input("Staff name / ID")
-        needs_pw = "STAFF_PASSWORD" in st.secrets  # optional: no password set = name-only sign-in (demo)
-        pw = st.text_input("Password", type="password") if needs_pw else ""
-        go = st.form_submit_button("Sign in", type="primary", icon=":material/login:")
-    if go:
-        if name.strip() and (not needs_pw or hmac.compare_digest(pw, st.secrets["STAFF_PASSWORD"])):
-            ss["staff_ok"], ss["staff_name"] = True, name.strip()
-            audit("staff", name.strip(), "LOGIN")
-            st.rerun()
-        audit("staff", "anonymous", "LOGIN_FAILED")
-        st.error("Invalid credentials.")
-
-
 def who():
-    return "staff", ss["staff_name"]
+    return "staff", "front-desk"
 
 
 def next_workday(d, step=1):
@@ -821,9 +764,6 @@ def audit_tab():
 
 
 def staff_view():
-    if not ss.get("staff_ok"):
-        staff_login()
-        return
     ss.setdefault("sch_day", next_workday(now_et().date()))
     t = st.tabs([":material/calendar_view_day: Schedule", ":material/hourglass_top: Waitlist", ":material/history: Activity log"])
     with t[0]:
@@ -832,15 +772,10 @@ def staff_view():
         waitlist_tab()
     with t[2]:
         audit_tab()
-    if st.sidebar.button("Staff sign out", icon=":material/logout:"):
-        audit(*who(), "LOGOUT")
-        for k in ("staff_ok", "focus_pid", "last_pick", "audited_focus"):
-            ss.pop(k, None)
-        st.rerun()
 
 
 # ====================================================================== MAIN
 header()
 view = st.sidebar.radio("Waitwise", ["Patient view", "Staff view"], label_visibility="collapsed")
-st.sidebar.caption(":material/lock: Encrypted connection · all changes audited")
+st.sidebar.caption(":material/history: All changes are recorded in the activity log")
 patient_view() if view == "Patient view" else staff_view()
