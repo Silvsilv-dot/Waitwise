@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 
 st.set_page_config(page_title="Waitwise", page_icon=":material/local_hospital:", layout="wide")
 
@@ -121,8 +121,12 @@ def engine():
             url = "postgresql+psycopg2://" + url[len(prefix):]
     if "sslmode" not in url:  # always encrypt in transit
         url += ("&" if "?" in url else "?") + "sslmode=require"
-    return create_engine(url, pool_pre_ping=True, pool_recycle=240, pool_size=5,
-                         connect_args={"application_name": "waitwise-app"})
+    eng = create_engine(url, pool_pre_ping=True, pool_recycle=240, pool_size=5)
+
+    @event.listens_for(eng, "begin")
+    def _tag(conn):  # pooler-safe: tag each transaction instead of the connection startup
+        conn.exec_driver_sql("SET LOCAL application_name = 'waitwise-app'")
+    return eng
 
 
 def query(sql, **params):
@@ -375,7 +379,7 @@ try:
     types()
 except Exception as e:
     st.error("Could not read the `waitroom` schema in Neon. Check DATABASE_URL and that the setup SQL has been run.")
-    st.caption(type(e).__name__)
+    st.caption(f"{type(e).__name__}: {str(e).splitlines()[0][:300] if str(e) else ''}")
     st.stop()
 
 
